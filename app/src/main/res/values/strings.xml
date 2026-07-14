@@ -165,7 +165,6 @@
 
     <!-- Download page enhancements -->
     <string name="download_page_title">Download Center</string>
-    <string name="hint_enter_video_url">Enter video URL to parse</string>
     <string name="btn_detect">Detect</string>
     <string name="detecting">Detecting video resources…</string>
     <string name="detect_failed">Failed to detect video resources</string>
