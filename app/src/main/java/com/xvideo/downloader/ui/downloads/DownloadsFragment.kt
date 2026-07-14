@@ -1,5 +1,7 @@
 package com.xvideo.downloader.ui.downloads
 
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -12,11 +14,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.chip.Chip
 import com.google.android.material.snackbar.Snackbar
 import com.xvideo.downloader.R
 import com.xvideo.downloader.data.local.database.entity.DownloadHistoryEntity
 import com.xvideo.downloader.data.model.DownloadTask
 import com.xvideo.downloader.data.model.DownloadTaskState
+import com.xvideo.downloader.data.model.M3u8Stream
+import com.xvideo.downloader.data.model.VideoInfo
+import com.xvideo.downloader.data.model.VideoVariant
+import com.xvideo.downloader.data.remote.repository.VideoParseState
 import com.xvideo.downloader.databinding.FragmentDownloadsBinding
 import com.xvideo.downloader.ui.player.PlayerActivity
 import com.xvideo.downloader.util.FileUtils
@@ -32,6 +39,24 @@ class DownloadsFragment : Fragment() {
     private lateinit var activeAdapter: ActiveDownloadsAdapter
     private lateinit var historyAdapter: DownloadHistoryAdapter
 
+    // Track selected quality for download
+    private var selectedVariant: VideoVariant? = null
+    private var selectedM3u8Stream: M3u8Stream? = null
+
+    companion object {
+        const val ARG_VIDEO_INFO = "arg_video_info"
+
+        fun newInstance(videoInfo: VideoInfo? = null): DownloadsFragment {
+            return DownloadsFragment().apply {
+                videoInfo?.let {
+                    arguments = Bundle().apply {
+                        putParcelable(ARG_VIDEO_INFO, it)
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -44,7 +69,22 @@ class DownloadsFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         setupRecyclerViews()
+        setupUrlInput()
         observeState()
+
+        // Check if VideoInfo was passed from HomeFragment
+        val videoInfo = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            arguments?.getParcelable(ARG_VIDEO_INFO, VideoInfo::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            arguments?.getParcelable(ARG_VIDEO_INFO)
+        }
+        videoInfo?.let { viewModel.setVideoInfo(it) }
+
+        // Auto-paste from clipboard if URL field is empty
+        if (binding.etVideoUrl.text.isNullOrEmpty()) {
+            pasteFromClipboardIfNeeded()
+        }
     }
 
     private fun setupRecyclerViews() {
@@ -53,7 +93,8 @@ class DownloadsFragment : Fragment() {
             onResume = { viewModel.resumeDownload(it.id) },
             onCancel = { viewModel.cancelDownload(it.id) },
             onPlay = { task ->
-                openPlayer(task.videoInfo.videoVariants.firstOrNull()?.url ?: return@ActiveDownloadsAdapter)
+                openPlayer(task.videoInfo.videoVariants.firstOrNull()?.url
+                    ?: return@ActiveDownloadsAdapter)
             }
         )
 
@@ -86,9 +127,84 @@ class DownloadsFragment : Fragment() {
         }
     }
 
+    private fun setupUrlInput() {
+        // Detect button
+        binding.btnDetect.setOnClickListener {
+            val url = binding.etVideoUrl.text.toString().trim()
+            if (url.isNotEmpty()) {
+                viewModel.parseUrl(url)
+            } else {
+                showSnackbar(getString(R.string.please_enter_url))
+            }
+        }
+
+        // Close video resource card
+        binding.btnCloseResource.setOnClickListener {
+            viewModel.clearParseState()
+        }
+
+        // Download button
+        binding.btnDownload.setOnClickListener {
+            if (selectedM3u8Stream != null) {
+                viewModel.startM3u8Download(selectedM3u8Stream!!)
+            } else if (selectedVariant != null) {
+                viewModel.startDownload(selectedVariant!!)
+            } else {
+                viewModel.quickDownload()
+            }
+        }
+
+        // Long press to paste
+        binding.etVideoUrl.setOnLongClickListener {
+            pasteFromClipboard()
+            true
+        }
+    }
+
     private fun observeState() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // Observe parse state
+                launch {
+                    viewModel.parseState.collectLatest { state ->
+                        when (state) {
+                            is VideoParseState.Idle -> {
+                                binding.progressDetect.isVisible = false
+                                binding.cardVideoResource.isVisible = false
+                                binding.tvError.isVisible = false
+                            }
+                            is VideoParseState.Loading -> {
+                                binding.progressDetect.isVisible = true
+                                binding.cardVideoResource.isVisible = false
+                                binding.tvError.isVisible = false
+                                binding.btnDetect.isEnabled = false
+                            }
+                            is VideoParseState.Success -> {
+                                binding.progressDetect.isVisible = false
+                                binding.btnDetect.isEnabled = true
+                                showVideoResources(state.videoInfo)
+                            }
+                            is VideoParseState.Error -> {
+                                binding.progressDetect.isVisible = false
+                                binding.btnDetect.isEnabled = true
+                                binding.cardVideoResource.isVisible = false
+                                binding.tvError.isVisible = true
+                                binding.tvError.text = state.message
+                            }
+                        }
+                    }
+                }
+
+                // Observe M3U8 streams for quality options
+                launch {
+                    viewModel.m3u8Streams.collectLatest { streams ->
+                        if (streams.isNotEmpty()) {
+                            updateQualityChips(m3u8Streams = streams)
+                        }
+                    }
+                }
+
+                // Observe active downloads
                 launch {
                     viewModel.activeDownloads.collectLatest { downloads ->
                         activeAdapter.submitList(downloads)
@@ -97,6 +213,7 @@ class DownloadsFragment : Fragment() {
                     }
                 }
 
+                // Observe completed downloads
                 launch {
                     viewModel.completedDownloads.collectLatest { history ->
                         historyAdapter.submitList(history)
@@ -105,11 +222,94 @@ class DownloadsFragment : Fragment() {
                     }
                 }
 
+                // Observe toast messages
                 launch {
                     viewModel.toastMessage.collectLatest { message ->
                         showSnackbar(message)
                     }
                 }
+            }
+        }
+    }
+
+    private fun showVideoResources(videoInfo: VideoInfo) {
+        binding.cardVideoResource.isVisible = true
+        binding.tvError.isVisible = false
+
+        // Set video info
+        binding.tvVideoAuthor.text = if (videoInfo.authorUsername != "direct") {
+            "${videoInfo.authorName} (@${videoInfo.authorUsername})"
+        } else {
+            videoInfo.authorName
+        }
+        binding.tvVideoTweet.text = videoInfo.tweetText
+
+        // Build quality chips from video variants
+        val variants = videoInfo.getAvailableQualities()
+        if (variants.isNotEmpty()) {
+            updateQualityChips(variants = variants)
+            // Default select best quality
+            selectedVariant = variants.first()
+            selectedM3u8Stream = null
+        }
+
+        binding.btnDownload.isEnabled = true
+    }
+
+    private fun updateQualityChips(
+        variants: List<VideoVariant> = emptyList(),
+        m3u8Streams: List<M3u8Stream> = emptyList()
+    ) {
+        binding.chipGroupQuality.removeAllViews()
+
+        // Add MP4 variant chips
+        for (variant in variants) {
+            val chip = Chip(requireContext()).apply {
+                text = variant.getQualityLabel()
+                isCheckable = true
+                isChecked = variant == selectedVariant
+                setOnClickListener {
+                    selectedVariant = variant
+                    selectedM3u8Stream = null
+                }
+            }
+            binding.chipGroupQuality.addView(chip)
+        }
+
+        // Add M3U8 stream chips
+        for (stream in m3u8Streams) {
+            val chip = Chip(requireContext()).apply {
+                text = stream.quality + if (stream.resolution != null) " (${stream.resolution})" else ""
+                isCheckable = true
+                isChecked = stream == selectedM3u8Stream
+                setOnClickListener {
+                    selectedM3u8Stream = stream
+                    selectedVariant = null
+                }
+            }
+            binding.chipGroupQuality.addView(chip)
+        }
+    }
+
+    private fun pasteFromClipboard() {
+        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val text = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+        if (!text.isNullOrEmpty()) {
+            binding.etVideoUrl.setText(text)
+        } else {
+            showSnackbar(getString(R.string.clipboard_empty))
+        }
+    }
+
+    private fun pasteFromClipboardIfNeeded() {
+        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val text = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+        if (!text.isNullOrEmpty()) {
+            val lowerText = text.lowercase()
+            if (lowerText.contains("twitter.com") || lowerText.contains("x.com") ||
+                lowerText.contains(".mp4") || lowerText.contains(".m3u8") ||
+                lowerText.contains("video")) {
+                binding.etVideoUrl.setText(text)
             }
         }
     }
@@ -180,7 +380,12 @@ class ActiveDownloadsAdapter(
 
         fun bind(task: DownloadTask) {
             binding.apply {
-                tvAuthor.text = task.videoInfo.authorName
+                // Show author name or URL for direct downloads
+                tvAuthor.text = if (task.videoInfo.authorUsername != "direct") {
+                    task.videoInfo.authorName
+                } else {
+                    task.videoInfo.tweetText.take(40) + if (task.videoInfo.tweetText.length > 40) "..." else ""
+                }
                 tvQuality.text = task.variant.getQualityLabel()
                 tvProgress.text = "${task.progress}%"
 
@@ -234,7 +439,7 @@ class DownloadHistoryAdapter(
         fun bind(item: DownloadHistoryEntity) {
             binding.apply {
                 tvAuthor.text = item.authorName
-                tvUsername.text = "@${item.authorUsername}"
+                tvUsername.text = if (item.authorUsername != "direct") "@${item.authorUsername}" else item.videoUrl.take(30)
                 tvQuality.text = item.quality
                 tvFileSize.text = if (item.fileSize > 0) FileUtils.formatFileSize(item.fileSize) else ""
                 tvDate.text = item.completedAt?.let { FileUtils.formatDuration(System.currentTimeMillis() - it) } ?: ""

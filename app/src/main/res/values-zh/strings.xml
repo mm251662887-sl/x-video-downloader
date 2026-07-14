@@ -165,4 +165,20 @@
     <string name="error_invalid_url_general">请输入有效的视频链接</string>
     <string name="clear_history_title">清除历史</string>
     <string name="clear_history_message">确定要清除所有播放历史吗？</string>
+
+    <!-- Download page enhancements -->
+    <string name="download_page_title">下载中心</string>
+    <string name="btn_detect">检测</string>
+    <string name="detecting">正在检测视频资源…</string>
+    <string name="detect_failed">检测视频资源失败</string>
+    <string name="video_resources_found">已找到视频资源</string>
+    <string name="select_quality_to_download">选择画质进行下载</string>
+    <string name="btn_quick_download">直接下载</string>
+    <string name="download_from_home">从首页解析的视频</string>
+    <string name="resuming_download">继续下载中…</string>
+    <string name="downloading_progress">下载中… %1$d%%</string>
+    <string name="download_paused">下载已暂停</string>
+    <string name="download_failed">下载失败：%1$s</string>
+    <string name="direct_download_hint">输入直接视频链接（MP4/M3U8）可快速下载</string>
+    <string name="no_video_resources">未检测到视频资源。请输入 Twitter/X 链接或直接视频地址。</string>
 </resources>

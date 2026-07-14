@@ -29,6 +29,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var keyboardListener: ViewTreeObserver.OnGlobalLayoutListener? = null
 
+    // Track fragments for show/hide management
+    private var activeFragment: Fragment? = null
+    private val fragmentTags = mutableMapOf<Int, String>()
+
+    companion object {
+        private const val TAG_HOME = "home"
+        private const val TAG_ONLINE = "online"
+        private const val TAG_DOWNLOADS = "downloads"
+        private const val TAG_LOCAL = "local"
+        private const val TAG_SETTINGS = "settings"
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -56,12 +68,15 @@ class MainActivity : AppCompatActivity() {
 
         // Load default fragment
         if (savedInstanceState == null) {
-            loadFragment(HomeFragment())
+            loadFragment(HomeFragment(), TAG_HOME)
+        } else {
+            // Restore active fragment reference
+            activeFragment = supportFragmentManager.fragments.firstOrNull { it.isVisible }
         }
 
         // Handle back press for WebView navigation
         onBackPressedDispatcher.addCallback(this) {
-            val currentFragment = supportFragmentManager.findFragmentById(R.id.fragmentContainer)
+            val currentFragment = activeFragment
             if (currentFragment is HomeFragment && currentFragment.canGoBack()) {
                 currentFragment.goBack()
             } else {
@@ -80,11 +95,36 @@ class MainActivity : AppCompatActivity() {
     private fun handleIntent(intent: Intent?) {
         intent?.getStringExtra(Intent.EXTRA_TEXT)?.let { sharedText ->
             if (sharedText.contains("twitter.com") || sharedText.contains("x.com")) {
-                // Navigate to home and paste URL
-                loadFragment(HomeFragment())
-                // The fragment will handle the URL
+                // Navigate to home and let it handle the URL
+                switchToTab(R.id.nav_home)
             }
         }
+    }
+
+    /**
+     * Called by HomeFragment after parsing a video URL.
+     * Switches to the Downloads tab with the parsed VideoInfo.
+     */
+    fun navigateToDownloads(downloadsFragment: DownloadsFragment) {
+        // Switch to downloads tab
+        binding.bottomNavigation.selectedItemId = R.id.nav_downloads
+
+        // Replace the downloads fragment with the new one carrying VideoInfo
+        val transaction = supportFragmentManager.beginTransaction()
+
+        // Hide current active fragment
+        activeFragment?.let { transaction.hide(it) }
+
+        // Remove existing downloads fragment if any
+        supportFragmentManager.findFragmentByTag(TAG_DOWNLOADS)?.let {
+            transaction.remove(it)
+        }
+
+        // Add new downloads fragment with VideoInfo
+        transaction.add(R.id.fragmentContainer, downloadsFragment, TAG_DOWNLOADS)
+        transaction.commit()
+
+        activeFragment = downloadsFragment
     }
 
     /**
@@ -111,23 +151,55 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupBottomNavigation() {
         binding.bottomNavigation.setOnItemSelectedListener { item ->
-            val fragment = when (item.itemId) {
-                R.id.nav_home -> HomeFragment()
-                R.id.nav_online -> OnlinePlayerFragment()
-                R.id.nav_downloads -> DownloadsFragment()
-                R.id.nav_local -> LocalVideosFragment()
-                R.id.nav_settings -> SettingsFragment()
+            when (item.itemId) {
+                R.id.nav_home -> showOrCreateFragment(HomeFragment(), TAG_HOME)
+                R.id.nav_online -> showOrCreateFragment(OnlinePlayerFragment(), TAG_ONLINE)
+                R.id.nav_downloads -> showOrCreateFragment(DownloadsFragment(), TAG_DOWNLOADS)
+                R.id.nav_local -> showOrCreateFragment(LocalVideosFragment(), TAG_LOCAL)
+                R.id.nav_settings -> showOrCreateFragment(SettingsFragment(), TAG_SETTINGS)
                 else -> return@setOnItemSelectedListener false
             }
-            loadFragment(fragment)
             true
         }
     }
 
-    private fun loadFragment(fragment: Fragment) {
+    /**
+     * Show existing fragment or create new one. Uses show/hide to preserve state.
+     */
+    private fun showOrCreateFragment(newFragment: Fragment, tag: String) {
+        val transaction = supportFragmentManager.beginTransaction()
+
+        // Hide current active fragment
+        activeFragment?.let { transaction.hide(it) }
+
+        // Check if fragment already exists
+        val existingFragment = supportFragmentManager.findFragmentByTag(tag)
+        if (existingFragment != null) {
+            transaction.show(existingFragment)
+            activeFragment = existingFragment
+        } else {
+            transaction.add(R.id.fragmentContainer, newFragment, tag)
+            activeFragment = newFragment
+        }
+
+        transaction.commit()
+    }
+
+    /**
+     * Load initial fragment (used only on first creation).
+     */
+    private fun loadFragment(fragment: Fragment, tag: String) {
         supportFragmentManager.beginTransaction()
-            .replace(R.id.fragmentContainer, fragment)
+            .add(R.id.fragmentContainer, fragment, tag)
             .commit()
+        activeFragment = fragment
+    }
+
+    /**
+     * Switch to a specific tab by menu item ID.
+     */
+    private fun switchToTab(menuItemId: Int) {
+        binding.bottomNavigation.selectedItemId = menuItemId
     }
 
     private fun checkPermissions() {

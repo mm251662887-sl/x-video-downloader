@@ -403,34 +403,71 @@ class DownloadManager(private val context: Context) {
         else "$basePrefix/$url"
     }
 
-    // ==================== Direct Download (MP4) ====================
+    // ==================== Direct Download (MP4) with Resume Support ====================
 
     private suspend fun downloadDirectFile(task: DownloadTask, outputFile: File) {
         try {
             updateTaskState(task.id, DownloadTaskState.DOWNLOADING)
 
-            val request = Request.Builder().url(task.url)
-                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36")
-                .build()
+            // Check for existing partial download to support resume
+            var downloadedBytes = 0L
+            var appendMode = false
+            if (outputFile.exists() && outputFile.length() > 0) {
+                downloadedBytes = outputFile.length()
+                appendMode = true
+                Log.d(TAG, "Resuming download from $downloadedBytes bytes for task ${task.id}")
+            }
 
-            val response = okHttpClient.newCall(request).execute()
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${response.message}")
+            val requestBuilder = Request.Builder().url(task.url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36")
+
+            // Add Range header for resume
+            if (appendMode && downloadedBytes > 0) {
+                requestBuilder.addHeader("Range", "bytes=$downloadedBytes-")
+            }
+
+            val response = okHttpClient.newCall(requestBuilder.build()).execute()
+
+            // If server doesn't support Range, restart from beginning
+            val supportsResume = response.code == 206
+            if (!response.isSuccessful && response.code != 206) {
+                throw Exception("HTTP ${response.code}: ${response.message}")
+            }
 
             val body = response.body ?: throw Exception("响应体为空")
-            val contentLength = body.contentLength()
+
+            // Calculate total content length
+            val contentLength: Long
+            if (supportsResume && appendMode) {
+                // Partial content: contentLength is the remaining bytes
+                val remaining = body.contentLength()
+                contentLength = if (remaining > 0) downloadedBytes + remaining else -1
+            } else if (appendMode && response.code == 200) {
+                // Server doesn't support Range, restart from scratch
+                downloadedBytes = 0L
+                appendMode = false
+                contentLength = body.contentLength()
+            } else {
+                contentLength = body.contentLength()
+            }
+
             task.totalBytes = contentLength
+            task.downloadedBytes = downloadedBytes
 
             body.byteStream().use { inputStream ->
-                FileOutputStream(outputFile).use { outputStream ->
+                FileOutputStream(outputFile, appendMode && supportsResume).use { outputStream ->
                     val buffer = ByteArray(8192)
                     var bytesRead: Int
-                    var totalBytesRead = 0L
+                    var totalBytesRead = downloadedBytes
                     var lastEmitTime = 0L
 
                     while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                         if (downloadJobs[task.id]?.isActive != true) {
                             outputStream.flush()
                             updateTaskState(task.id, DownloadTaskState.PAUSED)
+                            // Save progress for resume
+                            task.downloadedBytes = totalBytesRead
+                            downloadDao.updateProgress(task.id, 1, task.progress, outputFile.absolutePath, totalBytesRead)
                             return
                         }
 
@@ -444,7 +481,8 @@ class DownloadManager(private val context: Context) {
                         val now = System.currentTimeMillis()
                         if (now - lastEmitTime > 200) {
                             lastEmitTime = now
-                            emitProgress(task.id, progress, totalBytesRead, contentLength)
+                            emitProgress(task.id, progress, totalBytesRead, contentLength,
+                                statusText = if (supportsResume && appendMode) "继续下载中..." else "下载中...")
                         }
 
                         downloadDao.updateProgress(task.id, 1, progress, outputFile.absolutePath, totalBytesRead)
@@ -455,6 +493,11 @@ class DownloadManager(private val context: Context) {
             completeDownload(task, outputFile)
 
         } catch (e: Exception) {
+            if (downloadJobs[task.id]?.isActive != true) {
+                // Paused by user, don't mark as failed
+                Log.d(TAG, "Download paused for task ${task.id}")
+                return
+            }
             task.state = DownloadTaskState.FAILED
             updateTaskState(task.id, DownloadTaskState.FAILED)
             emitProgress(task.id, 0, error = e.message ?: "下载失败")
@@ -487,18 +530,21 @@ class DownloadManager(private val context: Context) {
     fun resumeDownload(taskId: String) {
         val task = _activeDownloads.value.find { it.id == taskId } ?: return
         val file = File(task.outputPath)
-        if (file.exists()) file.delete()
+        // Don't delete partial file — downloadDirectFile will use Range header to resume
 
-        scope.launch {
-            val job = scope.launch {
-                if (task.url.contains(".m3u8") || task.videoInfo.hasM3u8Stream()) {
-                    downloadM3u8Stream(task, file, task.videoInfo)
-                } else {
-                    downloadDirectFile(task, file)
-                }
+        updateTaskState(taskId, DownloadTaskState.DOWNLOADING)
+
+        val job = scope.launch {
+            if (task.url.contains(".m3u8") || task.videoInfo.hasM3u8Stream()) {
+                // M3U8 doesn't support resume, restart from scratch
+                if (file.exists()) file.delete()
+                downloadM3u8Stream(task, file, task.videoInfo)
+            } else {
+                // Direct download supports resume via HTTP Range
+                downloadDirectFile(task, file)
             }
-            downloadJobs[taskId] = job
         }
+        downloadJobs[taskId] = job
     }
 
     fun cancelDownload(taskId: String) {
@@ -536,6 +582,37 @@ class DownloadManager(private val context: Context) {
     }
 
     fun getActiveDownloads(): List<DownloadTask> = _activeDownloads.value
+
+    /**
+     * Start a download directly from a URL without requiring full VideoInfo.
+     * Creates a minimal VideoInfo + VideoVariant internally.
+     */
+    suspend fun startDownloadFromUrl(
+        url: String,
+        quality: String = "HD"
+    ): String {
+        val variant = VideoVariant(
+            url = url,
+            bitrate = when (quality) {
+                "4K" -> 8000000
+                "2K" -> 5000000
+                "HD" -> 2500000
+                else -> 1000000
+            },
+            contentType = "video/mp4"
+        )
+        val videoInfo = VideoInfo(
+            tweetId = "direct_${System.currentTimeMillis()}",
+            tweetUrl = url,
+            authorName = "直接下载",
+            authorUsername = "direct",
+            tweetText = url,
+            thumbnailUrl = null,
+            videoVariants = listOf(variant),
+            gifVariants = emptyList()
+        )
+        return startDownload(videoInfo, variant)
+    }
 
     data class DownloadProgress(
         val taskId: String, val progress: Int = 0,

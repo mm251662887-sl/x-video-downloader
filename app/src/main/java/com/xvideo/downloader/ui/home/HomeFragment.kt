@@ -17,15 +17,25 @@ import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.snackbar.Snackbar
 import com.xvideo.downloader.R
+import com.xvideo.downloader.data.remote.repository.VideoParseState
 import com.xvideo.downloader.databinding.FragmentHomeBinding
+import com.xvideo.downloader.ui.downloads.DownloadsFragment
 import com.xvideo.downloader.ui.player.PlayerActivity
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 class HomeFragment : Fragment() {
 
     private var _binding: FragmentHomeBinding? = null
     private val binding get() = _binding!!
+
+    private val viewModel: HomeViewModel by viewModels()
 
     // Video parsing sites with their URL patterns
     data class ParseSite(
@@ -91,7 +101,54 @@ class HomeFragment : Fragment() {
         setupUI()
         setupWebView()
         setupKeyboardListener()
+        observeViewModel()
         handleIntent(requireActivity().intent)
+    }
+
+    private fun observeViewModel() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // Observe parse state — navigate to downloads on success
+                launch {
+                    viewModel.parseState.collectLatest { state ->
+                        when (state) {
+                            is VideoParseState.Loading -> {
+                                binding.progressBar.isVisible = true
+                            }
+                            is VideoParseState.Success -> {
+                                binding.progressBar.isVisible = false
+                                // Navigate to DownloadsFragment with parsed video info
+                                navigateToDownloads(state.videoInfo)
+                            }
+                            is VideoParseState.Error -> {
+                                binding.progressBar.isVisible = false
+                                Snackbar.make(binding.root, state.message, Snackbar.LENGTH_LONG).show()
+                            }
+                            is VideoParseState.Idle -> {
+                                binding.progressBar.isVisible = false
+                            }
+                        }
+                    }
+                }
+
+                // Observe toast messages
+                launch {
+                    viewModel.toastMessage.collectLatest { message ->
+                        Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun navigateToDownloads(videoInfo: com.xvideo.downloader.data.model.VideoInfo) {
+        val downloadsFragment = DownloadsFragment.newInstance(videoInfo)
+
+        // Navigate via parent activity to switch to downloads tab
+        val activity = requireActivity()
+        if (activity is com.xvideo.downloader.ui.MainActivity) {
+            activity.navigateToDownloads(downloadsFragment)
+        }
     }
 
     /**
@@ -211,15 +268,15 @@ class HomeFragment : Fragment() {
             currentSiteIndex = position
         }
 
-        // Go button - parse URL or load site
+        // Go button - parse URL via ViewModel or load site
         binding.btnGo.setOnClickListener {
             val url = binding.etUrl.text.toString().trim()
             if (url.isNotEmpty()) {
                 if (isTwitterUrl(url)) {
-                    // Auto-fill URL into current parsing site
-                    loadSiteWithUrl(url)
+                    // Use ViewModel to parse the Twitter/X URL directly
+                    viewModel.parseUrl(url)
                 } else {
-                    // Treat as a regular URL
+                    // Treat as a regular URL — load in WebView
                     binding.webView.loadUrl(url)
                 }
             } else {
@@ -282,7 +339,8 @@ class HomeFragment : Fragment() {
         intent?.getStringExtra(Intent.EXTRA_TEXT)?.let { sharedText ->
             if (isTwitterUrl(sharedText)) {
                 binding.etUrl.setText(sharedText)
-                loadSiteWithUrl(sharedText)
+                // Auto-parse via ViewModel
+                viewModel.parseUrl(sharedText)
             }
         }
     }

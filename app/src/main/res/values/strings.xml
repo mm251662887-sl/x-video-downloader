@@ -162,4 +162,23 @@
     <string name="downloading_video_stream">Downloading video stream…</string>
     <string name="downloading_audio_stream">Downloading audio stream…</string>
     <string name="merging_ffmpeg">Merging audio + video (FFmpeg)…</string>
+
+    <!-- Download page enhancements -->
+    <string name="download_page_title">Download Center</string>
+    <string name="hint_enter_video_url">Enter video URL to parse</string>
+    <string name="btn_detect">Detect</string>
+    <string name="detecting">Detecting video resources…</string>
+    <string name="detect_failed">Failed to detect video resources</string>
+    <string name="video_resources_found">Video Resources Found</string>
+    <string name="select_quality_to_download">Select quality to download</string>
+    <string name="btn_quick_download">Quick Download</string>
+    <string name="download_from_home">Video parsed from Home page</string>
+    <string name="resuming_download">Resuming download…</string>
+    <string name="downloading_progress">Downloading… %1$d%%</string>
+    <string name="download_paused">Download paused</string>
+    <string name="download_failed">Download failed: %1$s</string>
+    <string name="direct_download_hint">Enter a direct video URL (MP4/M3U8) for quick download</string>
+    <string name="quality_format">%1$s (%2$s)</string>
+    <string name="bitrate_format">%1$d kbps</string>
+    <string name="no_video_resources">No video resources detected. Enter a Twitter/X URL or a direct video link.</string>
 </resources>
